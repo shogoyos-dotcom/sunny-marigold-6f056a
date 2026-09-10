@@ -562,7 +562,7 @@ state.groups = state.groups || [];
 state.transactions = (state.transactions||[]).filter(function(t){ return !t.groupId; });
 
 /* ---------- Supabase bulut (guruhlar) ---------- */
-var SB=null, SB_UID=null, sbChannels=[], cloudErr=null, cloudErrMsg='';
+var SB=null, SB_UID=null, SB_EMAIL=null, sbChannels=[], cloudErr=null, cloudErrMsg='', pendingInvite=null;
 function errText(e){
   if(!e) return '';
   return e.message || e.error_description || e.msg || e.error || e.hint || (typeof e==='string'?e:JSON.stringify(e));
@@ -576,15 +576,94 @@ var sbReady = (function(){
   }
   try{ SB = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {auth:{persistSession:true, autoRefreshToken:true}}); }
   catch(e){ cloudErr='config'; cloudErrMsg='createClient xato: '+errText(e); return Promise.resolve(false); }
+  SB.auth.onAuthStateChange(function(evt, session){
+    SB_UID = session ? session.user.id : null;
+    SB_EMAIL = session ? session.user.email : null;
+    if(evt==='SIGNED_OUT'){ state.groups=[]; try{localStorage.removeItem('birga_groups_cache');}catch(e){} }
+  });
   return SB.auth.getSession().then(function(r){
-    if(r.data && r.data.session) return r.data.session;
-    return SB.auth.signInAnonymously().then(function(x){ if(x.error) throw x.error; return x.data.session; });
-  }).then(function(s){ SB_UID = s.user.id; cloudErr=null; cloudErrMsg=''; return true; })
-    .catch(function(e){ console.error('auth', e); cloudErr='auth'; cloudErrMsg=errText(e); return false; });
+    var s = r.data && r.data.session;
+    if(s){ SB_UID=s.user.id; SB_EMAIL=s.user.email; cloudErr=null; }
+    else { cloudErr='noauth'; }
+    cloudErrMsg='';
+    return true;
+  }).catch(function(e){ console.error('auth', e); cloudErr='config'; cloudErrMsg=errText(e); return false; });
 })();
 
+function cloudConfigured(){ return !!SB; }
 function cloudOn(){ return !!(SB && SB_UID); }
 function cloudSetupMsg(){ return 'Bulut hali sozlanmagan. config.js faylini Supabase ma‘lumoti bilan to‘ldiring (SETUP.md ga qarang).'; }
+
+/* ---- kirish (email + parol) ---- */
+function authDo(mode, email, pw, cb){
+  var call = mode==='up'
+    ? SB.auth.signUp({email:email, password:pw})
+    : SB.auth.signInWithPassword({email:email, password:pw});
+  call.then(function(r){
+    if(r.error) return cb(errText(r.error));
+    if(mode==='up' && !r.data.session){
+      return cb('Email tasdiqlash yoqilgan. Supabase → Authentication → Providers → Email → «Confirm email» ni o‘chiring (SETUP.md).');
+    }
+    SB_UID = r.data.user ? r.data.user.id : (r.data.session && r.data.session.user.id);
+    SB_EMAIL = email;
+    cb(null);
+  });
+}
+function signOutCloud(){
+  SB.auth.signOut().then(function(){
+    SB_UID=null; SB_EMAIL=null; state.groups=[];
+    try{localStorage.removeItem('birga_groups_cache');}catch(e){}
+    sbChannels.forEach(function(ch){ try{SB.removeChannel(ch);}catch(e){} }); sbChannels=[];
+    go('groups');
+  });
+}
+function afterAuth(){
+  cloudErr=null;
+  subscribeCloud();
+  loadGroups().then(function(){
+    if(pendingInvite) claimPending();
+    else render();
+  });
+}
+function openLoginModal(){
+  var mode='in';
+  openModal('Guruhlar uchun kirish',
+    '<div class="seg" id="amode"><button type="button" data-a="in" aria-pressed="true">Bor hisob</button>'
+    +'<button type="button" data-a="up" aria-pressed="false">Yangi hisob</button></div>'
+    +'<div class="note">Bir xil email/parol bilan barcha telefon va kompyuterlarда bir xil guruhlar ko‘rinadi. Email haqiqiy bo‘lishi shart emas, lekin eslab qoling.</div>'
+    +'<form><div class="field"><label>Email</label><input name="email" type="email" inputmode="email" autocomplete="username" autofocus></div>'
+    +'<div class="field"><label>Parol (kamida 6 belgi)</label><input name="pw" type="password" autocomplete="current-password"></div>'
+    +'<button class="btn btn-primary btn-block" type="submit" id="abtn">Kirish</button></form>', {
+    onMount:function(root){
+      root.querySelectorAll('#amode button').forEach(function(b){
+        b.addEventListener('click',function(){
+          mode=b.dataset.a;
+          root.querySelectorAll('#amode button').forEach(function(x){ x.setAttribute('aria-pressed', x.dataset.a===mode); });
+          root.querySelector('#abtn').textContent = mode==='up' ? 'Ro‘yxatdan o‘tish' : 'Kirish';
+        });
+      });
+    },
+    onSubmit:function(f){
+      var email=(f.email.value||'').trim(), pw=f.pw.value||'';
+      if(!email || pw.length<6){ alert('Email va kamida 6 belgili parol kiriting.'); return; }
+      f.querySelector('#abtn').textContent='...';
+      authDo(mode, email, pw, function(err){
+        if(err){ alert(err); f.querySelector('#abtn').textContent = mode==='up'?'Ro‘yxatdan o‘tish':'Kirish'; return; }
+        closeModal(); afterAuth();
+      });
+    }
+  });
+}
+function claimPending(){
+  if(!pendingInvite || !SB_UID){ return; }
+  var pi=pendingInvite; pendingInvite=null;
+  SB.rpc('claim_member',{p_member:pi.member, p_token:pi.token}).then(function(r){
+    if(r.error){ sbFail(r.error); return; }
+    closeModal();
+    subscribeCloud();
+    loadGroups().then(function(){ if(r.data && r.data.group_id) go('group',{id:r.data.group_id,tab:'expenses'}); else go('groups'); });
+  });
+}
 function myMember(g){ return (g.members||[]).filter(function(m){ return m.user_id && m.user_id===SB_UID; })[0]; }
 function meId(g){ var m=myMember(g); return m ? m.id : '__me__'; }
 function myRole(g){ var m=myMember(g); return m ? m.role : 'viewer'; }
@@ -645,7 +724,7 @@ function subscribeCloud(){
 }
 
 function createGroupCloud(name, memberNames, done){
-  if(!cloudOn()){ alert(cloudSetupMsg()); return; }
+  if(!cloudOn()){ openLoginModal(); return; }
   var gid=null;
   SB.from('groups').insert({name:name, currency:state.currency||'UZS', created_by:SB_UID}).select().single().then(function(r){
     if(r.error) throw r.error; gid=r.data.id;
@@ -658,7 +737,7 @@ function createGroupCloud(name, memberNames, done){
     .then(function(){ done&&done(gid); }).catch(sbFail);
 }
 function addMemberTo(g, name, done){
-  if(!cloudOn()){ alert(cloudSetupMsg()); return; }
+  if(!cloudOn()){ openLoginModal(); return; }
   SB.from('members').insert({group_id:g.id, name:name, role:'editor', claim_token:randToken()}).select().single()
     .then(function(r){ if(r.error) throw r.error; var mid=r.data.id; return loadGroups().then(function(){ done&&done(mid); }); })
     .catch(sbFail);
@@ -709,15 +788,20 @@ function handleInviteHash(){
   var memberId=m[1], token=m[2];
   try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}
   sbReady.then(function(ok){
-    if(!ok){ alert(cloudSetupMsg()); return; }
+    if(!ok || !SB){ alert(cloudSetupMsg()); return; }
     SB.rpc('invite_preview',{p_member:memberId, p_token:token}).then(function(r){
       if(r.error || !r.data || !r.data.length){ alert('Taklif havolasi yaroqsiz.'); return; }
       var pv=r.data[0];
-      if(pv.already_claimed){ alert('Bu taklif allaqachon ishlatilgan.'); loadGroups().then(function(){ go('groups'); }); return; }
+      if(pv.already_claimed){ alert('Bu taklif allaqachon ishlatilgan (yoki siz allaqachon a‘zosiz).'); if(SB_UID) loadGroups().then(function(){ go('groups'); }); return; }
+      pendingInvite={member:memberId, token:token};
       openModal('Guruhga qo‘shilish',
         '<div class="view-amt">'+esc(pv.group_name)+'</div>'
         +'<div class="note">Siz «'+esc(pv.member_name)+'» sifatida «'+esc(pv.group_name)+'» guruhiga qo‘shilyapsiz. Shaxsiy hamyoningiz hech kimga ko‘rinmaydi.</div>'
-        +'<button class="btn btn-primary btn-block" type="button" data-act="do-claim" data-m="'+esc(memberId)+'" data-t="'+esc(token)+'">Qo‘shilish</button>', {});
+        + (SB_UID
+            ? '<button class="btn btn-primary btn-block" type="button" data-act="claim-now">Qo‘shilish</button>'
+            : '<div class="note">Buning uchun avval kirasiz (bir marta). Bir xil email/parol bilan barcha qurilmalarда ko‘rinadi.</div>'
+              +'<button class="btn btn-primary btn-block" type="button" data-act="login">Kirish va qo‘shilish</button>')
+      , {});
     }).catch(sbFail);
   });
 }
@@ -996,14 +1080,22 @@ mountFns.tx=function(){
 /* ---------- GROUPS ---------- */
 function viewGroups(){
   var h='<div class="topbar"><h1>Guruhlar</h1></div><div class="stack">';
-  if(cloudErr==='config'){
-    h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2)">Bulut sozlanmagan — guruhlar ishlashi uchun <b>config.js</b> ni Supabase ma‘lumoti bilan to‘ldiring (SETUP.md). Shaxsiy hamyon baribir ishlayveradi.</div>';
-  }else if(cloudErr==='auth'||cloudErr==='load'){
+  if(!cloudConfigured()){
+    h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2)">Bulut sozlanmagan — <b>config.js</b> ni Supabase ma‘lumoti bilan to‘ldiring (SETUP.md). Shaxsiy hamyon baribir ishlayveradi.</div>';
+    h+='</div>'; return h;
+  }
+  if(!SB_UID){
+    h+='<div class="card"><h2 style="margin-bottom:6px">Kirish kerak</h2>'
+      +'<div class="note" style="margin-bottom:12px">Guruhlar barcha telefon va kompyuterlaringizда bir xil ko‘rinishi uchun <b>email va parol</b> bilan kiring. Bir marta.</div>'
+      +'<button class="btn btn-primary btn-block" data-act="login">Kirish / ro‘yxatdan o‘tish</button></div>';
+    h+='</div>'; return h;
+  }
+  if(cloudErr==='load'){
     h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2);cursor:pointer" data-act="show-cloud-err">'
-      +'Bulut bilan aloqa yo‘q. <u>Batafsil xato uchun bosing</u>'
+      +'Bulut bilan aloqa yo‘q. <u>Batafsil uchun bosing</u>'
       +(cloudErrMsg?('<br><span style="font-size:11px;opacity:.8">'+esc(cloudErrMsg.slice(0,120))+'</span>'):'')+'</div>';
   }
-  if(!state.groups.length && !cloudErr){
+  if(!state.groups.length && cloudErr!=='load'){
     h+='<div class="empty">Hali guruh yo‘q.<br>Pastdagi + tugma orqali guruh yarating va a‘zolarni taklif qiling.</div>';
   }
   state.groups.forEach(function(g){
@@ -1040,7 +1132,7 @@ function viewGroup(){
     +'<div><h1 style="font-size:21px">'+esc(g.name)+'</h1>'
     +'<div class="sub" style="color:var(--ink-2);font-size:12.5px">☁ '+g.members.length+' a‘zo · Xarajat '+fmtMoney(total)+(totalIn>0?' · Tushum '+fmtMoney(totalIn):'')+'</div></div></div>';
 
-  if(cloudErr==='load' || cloudErr==='auth'){
+  if(cloudErr==='load'){
     h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2);cursor:pointer" data-act="show-cloud-err">Bulut bilan aloqa yo‘q. <u>Batafsil uchun bosing</u></div>';
   }
   if(!canEdit(g)){
@@ -1148,6 +1240,19 @@ function viewProfil(){
   h+='<div class="card"><div class="card-h"><h2>Foydalanuvchi</h2><button class="link" data-act="edit-me">Tahrirlash</button></div>'
     +'<div class="row" style="border:0;padding:4px 0"><div class="avatar" style="background:'+colorFor('me')+'">'+esc(initials(state.me.name))+'</div>'
     +'<div class="main"><div class="t">'+esc(state.me.name)+'</div><div class="s">Guruhlarda shu nom ko‘rinadi</div></div></div></div>';
+
+  if(cloudConfigured()){
+    h+='<div class="card"><div class="card-h"><h2>Bulut hisobi</h2></div>';
+    if(SB_UID){
+      h+='<div class="row" style="border:0;padding:4px 0"><div class="avatar" style="background:var(--accent);color:var(--accent-ink)">☁</div>'
+        +'<div class="main"><div class="t">'+esc(SB_EMAIL||'kirilgan')+'</div><div class="s">Guruhlar shu hisobga bog‘langan — barcha qurilmalarда bir xil</div></div></div>'
+        +'<div style="height:8px"></div><button class="btn btn-block" data-act="logout">Chiqish</button>';
+    }else{
+      h+='<div class="note" style="margin-bottom:10px">Guruhlar uchun kirmagansiz. Bir xil email/parol bilan barcha qurilmalarда bir xil guruhlar ko‘rinadi.</div>'
+        +'<button class="btn btn-primary btn-block" data-act="login">Kirish / ro‘yxatdan o‘tish</button>';
+    }
+    h+='</div>';
+  }
 
   h+='<div class="card"><div class="card-h"><h2>Hisoblar</h2><button class="link" data-act="add-account">Qo‘shish</button></div><div class="list">';
   state.accounts.forEach(function(a){
@@ -1337,7 +1442,8 @@ function openMeModal(){
 
 /* ---------- group modals ---------- */
 function openGroupModal(){
-  if(!cloudOn()){ alert(cloudSetupMsg()); return; }
+  if(!cloudConfigured()){ alert(cloudSetupMsg()); return; }
+  if(!SB_UID){ openLoginModal(); return; }
   openModal('Yangi guruh','<form>'
     +'<div class="field"><label>Guruh nomi</label><input name="name" placeholder="Sayohat, Kvartira…" autofocus></div>'
     +'<div class="field"><label>A‘zolar (vergul bilan, ixtiyoriy)</label><input name="mem" placeholder="Ali, Laylo, Sardor"></div>'
@@ -1844,13 +1950,10 @@ document.addEventListener('click', function(e){
     if(!confirm('Bu a‘zo guruhdan chiqarilsinmi? Uning amaliyotlari qoladi.')) return;
     closeModal(); removeMember(g3, id); return;
   }
-  if(a==='do-claim'){
-    el.textContent='Qo‘shilyapti…';
-    SB.rpc('claim_member',{p_member:el.dataset.m, p_token:el.dataset.t}).then(function(r){
-      if(r.error){ sbFail(r.error); return; }
-      closeModal();
-      loadGroups().then(function(){ if(r.data && r.data.group_id) go('group',{id:r.data.group_id,tab:'expenses'}); else go('groups'); });
-    });
+  if(a==='claim-now'){ el.textContent='Qo‘shilyapti…'; claimPending(); return; }
+  if(a==='login'){ openLoginModal(); return; }
+  if(a==='logout'){
+    if(confirm('Chiqasizmi? Guruhlar shu qurilmadan yashiriladi (bulutda qoladi, qayta kirsangiz ko‘rinadi).')) signOutCloud();
     return;
   }
   if(a==='share-link'){
@@ -1946,13 +2049,12 @@ document.addEventListener('keydown', function(e){ if(e.key==='Escape' && !modalE
 /* ---------- go ---------- */
 render();
 sbReady.then(function(ok){
-  if(ok){
+  if(ok && SB_UID){
     subscribeCloud(); loadGroups();
-    // realtime ishlamay qolsa — zaxira sifatida vaqti-vaqti bilan yangilash
-    setInterval(function(){ if(document.hidden || !modalEl.hidden) return; loadGroups(); }, 25000);
-    document.addEventListener('visibilitychange', function(){ if(!document.hidden) loadGroups(); });
+    setInterval(function(){ if(document.hidden || !modalEl.hidden || !SB_UID) return; loadGroups(); }, 25000);
+    document.addEventListener('visibilitychange', function(){ if(!document.hidden && SB_UID) loadGroups(); });
   } else {
-    try{ state.groups = JSON.parse(localStorage.getItem('birga_groups_cache'))||state.groups||[]; }catch(e){}
+    try{ if(SB_UID) state.groups = JSON.parse(localStorage.getItem('birga_groups_cache'))||state.groups||[]; }catch(e){}
     render();
   }
   handleInviteHash();
