@@ -562,19 +562,25 @@ state.groups = state.groups || [];
 state.transactions = (state.transactions||[]).filter(function(t){ return !t.groupId; });
 
 /* ---------- Supabase bulut (guruhlar) ---------- */
-var SB=null, SB_UID=null, sbChannels=[], cloudErr=null;
+var SB=null, SB_UID=null, sbChannels=[], cloudErr=null, cloudErrMsg='';
+function errText(e){
+  if(!e) return '';
+  return e.message || e.error_description || e.msg || e.error || e.hint || (typeof e==='string'?e:JSON.stringify(e));
+}
 var sbReady = (function(){
   var c = window.BIRGA_CONFIG || {};
-  if(!c.supabaseUrl || /XXXX/.test(c.supabaseUrl) || !window.supabase || typeof window.supabase.createClient!=='function'){
-    cloudErr='config'; return Promise.resolve(false);
+  if(!c.supabaseUrl || /XXXX/.test(c.supabaseUrl) || !c.supabaseAnonKey || /ANON_KEY/.test(c.supabaseAnonKey) || !window.supabase || typeof window.supabase.createClient!=='function'){
+    cloudErr='config';
+    cloudErrMsg = !window.supabase ? 'Supabase kutubxonasi yuklanmadi (internet?)' : 'config.js to‘ldirilmagan';
+    return Promise.resolve(false);
   }
   try{ SB = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {auth:{persistSession:true, autoRefreshToken:true}}); }
-  catch(e){ cloudErr='config'; return Promise.resolve(false); }
+  catch(e){ cloudErr='config'; cloudErrMsg='createClient xato: '+errText(e); return Promise.resolve(false); }
   return SB.auth.getSession().then(function(r){
     if(r.data && r.data.session) return r.data.session;
     return SB.auth.signInAnonymously().then(function(x){ if(x.error) throw x.error; return x.data.session; });
-  }).then(function(s){ SB_UID = s.user.id; cloudErr=null; return true; })
-    .catch(function(e){ console.error('auth', e); cloudErr='auth'; return false; });
+  }).then(function(s){ SB_UID = s.user.id; cloudErr=null; cloudErrMsg=''; return true; })
+    .catch(function(e){ console.error('auth', e); cloudErr='auth'; cloudErrMsg=errText(e); return false; });
 })();
 
 function cloudOn(){ return !!(SB && SB_UID); }
@@ -611,8 +617,8 @@ function rowToSettlement(r){ return { id:r.id, from:r.from_member, to:r.to_membe
 function loadGroups(){
   if(!cloudOn()) return Promise.resolve();
   return SB.from('groups').select('*, members(*), entries(*), settlements(*)').then(function(res){
-    if(res.error){ cloudErr='load'; console.error(res.error); render(); return; }
-    cloudErr=null;
+    if(res.error){ cloudErr='load'; cloudErrMsg=errText(res.error); console.error(res.error); render(); return; }
+    cloudErr=null; cloudErrMsg='';
     state.groups = (res.data||[]).map(function(row){
       return {
         id:row.id, name:row.name, currency:row.currency||'UZS', createdBy:row.created_by,
@@ -657,14 +663,19 @@ function addMemberTo(g, name, done){
     .then(function(r){ if(r.error) throw r.error; var mid=r.data.id; return loadGroups().then(function(){ done&&done(mid); }); })
     .catch(sbFail);
 }
-function setMemberRole(g, memberId, role){
-  SB.from('members').update({role:role}).eq('id',memberId).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
+function updateMember(g, memberId, patch, done){
+  SB.from('members').update(patch).eq('id',memberId).then(function(r){
+    if(r.error) return sbFail(r.error);
+    loadGroups().then(function(){ done&&done(); });
+  });
 }
-function removeMember(g, memberId){
-  SB.from('members').delete().eq('id',memberId).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
-}
-function renameMemberCloud(g, memberId, name){
-  SB.from('members').update({name:name}).eq('id',memberId).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
+function setMemberRole(g, memberId, role){ updateMember(g, memberId, {role:role}); }
+function renameMemberCloud(g, memberId, name){ updateMember(g, memberId, {name:name}); }
+function removeMember(g, memberId, done){
+  SB.from('members').delete().eq('id',memberId).then(function(r){
+    if(r.error) return sbFail(r.error);
+    loadGroups().then(function(){ done&&done(); });
+  });
 }
 function updateGroupMeta(g, patch){
   SB.from('groups').update(patch).eq('id',g.id).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
@@ -988,7 +999,9 @@ function viewGroups(){
   if(cloudErr==='config'){
     h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2)">Bulut sozlanmagan — guruhlar ishlashi uchun <b>config.js</b> ni Supabase ma‘lumoti bilan to‘ldiring (SETUP.md). Shaxsiy hamyon baribir ishlayveradi.</div>';
   }else if(cloudErr==='auth'||cloudErr==='load'){
-    h+='<div class="note" style="color:var(--neg)">Bulut bilan aloqa yo‘q — internetni tekshiring.</div>';
+    h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2);cursor:pointer" data-act="show-cloud-err">'
+      +'Bulut bilan aloqa yo‘q. <u>Batafsil xato uchun bosing</u>'
+      +(cloudErrMsg?('<br><span style="font-size:11px;opacity:.8">'+esc(cloudErrMsg.slice(0,120))+'</span>'):'')+'</div>';
   }
   if(!state.groups.length && !cloudErr){
     h+='<div class="empty">Hali guruh yo‘q.<br>Pastdagi + tugma orqali guruh yarating va a‘zolarni taklif qiling.</div>';
@@ -1028,7 +1041,7 @@ function viewGroup(){
     +'<div class="sub" style="color:var(--ink-2);font-size:12.5px">☁ '+g.members.length+' a‘zo · Xarajat '+fmtMoney(total)+(totalIn>0?' · Tushum '+fmtMoney(totalIn):'')+'</div></div></div>';
 
   if(cloudErr==='load' || cloudErr==='auth'){
-    h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2)">Bulut bilan aloqa yo‘q — o‘zgarishlar saqlanmasligi mumkin. Internetni tekshiring.</div>';
+    h+='<div class="note" style="color:var(--neg);border:1px solid var(--neg);background:var(--surface-2);cursor:pointer" data-act="show-cloud-err">Bulut bilan aloqa yo‘q. <u>Batafsil uchun bosing</u></div>';
   }
   if(!canEdit(g)){
     h+='<div class="note">Sizda «faqat ko‘rish» huquqi bor. Xarajat qo‘shish uchun guruh egasidan ruxsat so‘rang.</div>';
@@ -1097,25 +1110,16 @@ function viewGroup(){
 
     var owner=isOwner(g);
     h+='<div class="card" style="margin-top:14px"><div class="card-h"><h2>A‘zolar</h2>'
-      +(owner?'<button class="link" data-act="add-member">A‘zo + taklif</button>':'')+'</div><div class="list">';
+      +(owner?'<button class="link" data-act="add-member">A‘zo qo‘shish</button>':'')+'</div><div class="list">';
     g.members.forEach(function(m){
       var pending = !m.user_id;
-      h+='<div class="row">'
+      var canManage = owner || m.id===meId(g);
+      h+='<div class="row'+(canManage?' tap" data-act="edit-member" data-id="'+m.id+'"':'"')+'>'
         +'<div class="avatar" style="background:'+colorFor(m.id)+'">'+esc(initials(m.name))+'</div>'
         +'<div class="main"><div class="t">'+esc(m.name)+(m.id===meId(g)?' (siz)':'')+'</div>'
-        +'<div class="s">'+(pending?'taklif kutilyapti':roleLabel(m.role))+'</div></div>';
-      if(owner && m.id!==meId(g)){
-        h+='<div class="end" style="display:flex;flex-direction:column;gap:5px;align-items:flex-end">'
-          +'<select class="mrole" data-id="'+m.id+'" style="font-size:12px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)">'
-          +['editor','viewer','owner'].map(function(r){return '<option value="'+r+'"'+(m.role===r?' selected':'')+'>'+roleLabel(r)+'</option>';}).join('')
-          +'</select>'
-          +(pending?'<button class="mini-btn" data-act="invite-member" data-id="'+m.id+'">Taklif havolasi</button>'
-                   :'<button class="btn btn-danger" data-act="del-member" data-id="'+m.id+'" style="padding:3px 7px;font-size:12px">Chiqarish</button>')
-          +'</div>';
-      } else if(owner && m.id===meId(g)){
-        h+='<div class="end"><button class="btn" data-act="edit-member" data-id="'+m.id+'" style="padding:4px 9px;font-size:12px">Ism</button></div>';
-      }
-      h+='</div>';
+        +'<div class="s">'+(pending?'⏳ taklif kutilyapti':roleLabel(m.role))+(canManage?' · bosing':'')+'</div></div>'
+        +(canManage?'<div class="end" style="color:var(--ink-3)">›</div>':'')
+        +'</div>';
     });
     h+='</div></div>';
 
@@ -1135,13 +1139,7 @@ function viewGroup(){
   }
   return h;
 }
-mountFns.group=function(){
-  document.querySelectorAll('.mrole').forEach(function(sel){
-    sel.addEventListener('change', function(){
-      var g=grp(route.id); if(g) setMemberRole(g, sel.dataset.id, sel.value);
-    });
-  });
-};
+mountFns.group=function(){};
 
 /* ---------- PROFIL ---------- */
 function viewProfil(){
@@ -1666,21 +1664,58 @@ function openExpenseModal(groupId, existing){
 
 function openMemberModal(g, existing){
   var m=existing||null;
-  openModal(m?'A‘zo ismi':'A‘zo qo‘shish va taklif qilish','<form>'
-    +'<div class="field"><label>Ism</label><input name="n" value="'+esc(m?m.name:'')+'" placeholder="Masalan: Ali" autofocus></div>'
-    +(m?'':'<div class="note">Saqlagach, «'+'Ali'+'» uchun shaxsiy taklif havolasi chiqadi — uni yuborasiz.</div>')
-    +'<button class="btn btn-primary btn-block" type="submit">'+(m?'Saqlash':'Qo‘shish')+'</button>'
-    +'</form>',{
+  var owner=isOwner(g);
+  var isSelf = m && m.id===meId(g);
+  var canRole = m && owner && !isSelf;
+  var pending = m && !m.user_id;
+  var curRole = m ? m.role : 'editor';
+
+  var body='<form>'
+    +'<div class="field"><label>Ism</label><input name="n" value="'+esc(m?m.name:'')+'" placeholder="Masalan: Ali" autofocus></div>';
+  if(canRole){
+    body+='<div class="field"><label>Ruxsat</label><div class="seg" id="rseg">'
+      +['owner','editor','viewer'].map(function(r){ return '<button type="button" data-r="'+r+'" aria-pressed="'+(curRole===r)+'" style="font-size:13px">'+roleLabel(r)+'</button>'; }).join('')
+      +'</div>'
+      +'<div class="split-status" style="padding-top:6px">Egasi — hammasi · Tahrirlaydi — amaliyot qo‘shadi · Faqat ko‘radi — kuzatadi</div></div>';
+  }
+  if(pending){
+    body+='<button class="btn btn-block" type="button" data-act="invite-member" data-id="'+m.id+'">📨 Taklif havolasini olish</button>';
+  }
+  body+='<button class="btn btn-primary btn-block" type="submit">'+(m?'Saqlash':'Qo‘shish')+'</button>';
+  if(m && owner && !isSelf){
+    body+='<button class="btn btn-danger btn-block" type="button" data-act="del-member" data-id="'+m.id+'">Guruhdan chiqarish</button>';
+  }
+  if(!m){
+    body+='<div class="note">Saqlagach, shu a‘zo uchun shaxsiy taklif havolasi chiqadi — uni Telegram/WhatsApp orqali yuborasiz.</div>';
+  }
+  body+='</form>';
+
+  openModal(m ? (isSelf?'Sizning ismingiz':esc(m.name)) : 'A‘zo qo‘shish', body, {
+    onMount:function(root){
+      var role=curRole;
+      root.querySelectorAll('#rseg button').forEach(function(b){
+        b.addEventListener('click',function(){
+          role=b.dataset.r;
+          root.querySelectorAll('#rseg button').forEach(function(x){ x.setAttribute('aria-pressed', x.dataset.r===role); });
+        });
+      });
+      root._getRole=function(){ return role; };
+    },
     onSubmit:function(f){
       var n=f.n.value.trim(); if(!n) return;
       if(m){
-        if(m.id===meId(g)){
+        if(isSelf){
           state.me.name=n; save();
-          state.groups.forEach(function(gr){ var mm2=myMember(gr); if(mm2) renameMemberCloud(gr, mm2.id, n); });
+          state.groups.forEach(function(gr){ var mm2=myMember(gr); if(mm2 && mm2.name!==n) renameMemberCloud(gr, mm2.id, n); });
+          closeModal();
         }else{
-          renameMemberCloud(g, m.id, n);
+          var patch={};
+          if(n!==m.name) patch.name=n;
+          var nr = modalEl._getRole && modalEl._getRole();
+          if(nr && nr!==m.role) patch.role=nr;
+          closeModal();
+          if(Object.keys(patch).length) updateMember(g, m.id, patch);
         }
-        closeModal();
       }else{
         addMemberTo(g, n, function(mid){ closeModal(); if(mid) openInviteFor(g.id, mid); });
       }
@@ -1740,6 +1775,14 @@ document.addEventListener('click', function(e){
   var a=el.dataset.act;
 
   if(a==='close-modal'){ closeModal(); return; }
+  if(a==='show-cloud-err'){
+    var cfg=window.BIRGA_CONFIG||{};
+    alert('BULUT XATOSI\n\n'+(cloudErrMsg||'—')
+      +'\n\nURL: '+(cfg.supabaseUrl||'(yo‘q)')
+      +'\nKey boshi: '+String(cfg.supabaseAnonKey||'').slice(0,12)+'…'
+      +'\n\nTez-tez uchraydigan sabab: Supabase → Authentication → «Anonymous Sign-Ins» yoqilmagan. Yoki key noto‘g‘ri (legacy «anon public» — eyJ... bilan boshlanadi).');
+    return;
+  }
   if(a==='nav'){ go(el.dataset.screen); return; }
   if(a==='fab'){
     if(route.name==='groups') openGroupModal();
@@ -1799,7 +1842,7 @@ document.addEventListener('click', function(e){
   if(a==='del-member'){
     var g3=grp(route.id), id=el.dataset.id;
     if(!confirm('Bu a‘zo guruhdan chiqarilsinmi? Uning amaliyotlari qoladi.')) return;
-    removeMember(g3, id); return;
+    closeModal(); removeMember(g3, id); return;
   }
   if(a==='do-claim'){
     el.textContent='Qo‘shilyapti…';
