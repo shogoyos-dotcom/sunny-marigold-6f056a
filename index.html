@@ -1187,7 +1187,11 @@ function viewGroup(){
       h+='</div></div>';
     }
 
-    h+='<div style="height:14px"></div><button class="btn btn-block btn-danger" data-act="leave-group">'
+    h+='<div style="height:16px"></div>';
+    if(isOwner(g) && (g.expenses.length || (g.settlements||[]).length)){
+      h+='<button class="btn btn-block btn-danger" data-act="clear-group" style="margin-bottom:8px">Guruh tarixini tozalash (0 ga qaytarish)</button>';
+    }
+    h+='<button class="btn btn-block btn-danger" data-act="leave-group">'
       +(isOwner(g)?'Guruhni butunlay o‘chirish':'Guruhdan chiqish')+'</button>';
   }
   return h;
@@ -1233,10 +1237,10 @@ function viewProfil(){
     +'<div style="height:12px"></div>'
     +'<button class="btn btn-block" data-act="data-io">Ma‘lumotni ko‘chirish / joylash</button>'
     +'<div style="height:8px"></div>'
-    +'<button class="btn btn-block btn-danger" data-act="reset-data">Hammasini o‘chirish va namunaga qaytish</button>'
+    +'<button class="btn btn-block btn-danger" data-act="clear-personal">Shaxsiy amaliyotlarni tozalash (0 ga qaytarish)</button>'
     +'</div>';
 
-  h+='<div class="note">Shaxsiy hamyon va oddiy guruhlar faqat shu qurilmada saqlanadi — boshqa telefonga «Ma‘lumotni ko‘chirish» orqali o‘tkazing. ☁ bilan belgilangan bulutli guruhlar esa a‘zolar bilan avtomatik sinxronlanadi.</div>';
+  h+='<div class="note">«Shaxsiy amaliyotlarni tozalash» — faqat guruhdan tashqari kirim/chiqimlaringizni o‘chiradi (hisoblar 0 ga tushadi, kategoriyalar qoladi). Guruh tarixi har bir guruh ichidan alohida tozalanadi.</div>';
 
   h+='</div>';
   return h;
@@ -1923,6 +1927,20 @@ document.addEventListener('click', function(e){
     else { try{ navigator.clipboard.writeText(lk); el.textContent='Nusxa olindi ✓'; }catch(e){ var t=document.getElementById('ioout'); if(t){t.select();document.execCommand('copy');} el.textContent='Nusxa olindi ✓'; } }
     return;
   }
+  if(a==='clear-group'){
+    var gc=grp(route.id);
+    if(!gc || !isOwner(gc)) return;
+    if(!confirm('«'+gc.name+'» guruhidagi BARCHA xarajat, tushum va hisob-kitoblar o‘chiriladi. A‘zolar qoladi, balanslar 0 ga qaytadi. Davom etilsinmi?')) return;
+    el.textContent='Tozalanmoqda…';
+    SB.from('entries').delete().eq('group_id',gc.id).then(function(r){
+      if(r.error) throw r.error;
+      return SB.from('settlements').delete().eq('group_id',gc.id);
+    }).then(function(r){
+      if(r && r.error) throw r.error;
+      return loadGroups();
+    }).catch(sbFail);
+    return;
+  }
   if(a==='leave-group'){
     var gL=grp(route.id);
     if(isOwner(gL)){
@@ -1996,9 +2014,11 @@ document.addEventListener('click', function(e){
     try{ document.execCommand('copy'); el.textContent='Nusxa olindi ✓'; }catch(err){}
     return;
   }
-  if(a==='reset-data'){
-    if(confirm('Shaxsiy ma‘lumot (hisoblar, kategoriyalar, amaliyotlar) o‘chiriladi va namuna qaytariladi. Bulutli guruhlarga tegilmaydi. Davom etilsinmi?')){
-      var kg=state.groups; state=seed(); state.groups=kg;
+  if(a==='clear-personal'){
+    if(confirm('Guruhdan tashqari BARCHA kirim/chiqim amaliyotlari o‘chiriladi. Hisoblar 0 ga tushadi. Kategoriyalar, byudjet, guruhlar qoladi. Davom etilsinmi?')){
+      state.transactions=[];
+      state.accounts.forEach(function(a){ a.opening=0; });
+      state.isSample=false;
       save(); closeModal(); go('home');
     }
     return;
