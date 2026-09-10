@@ -695,13 +695,14 @@ function createGroupCloud(name, memberNames, done){
     var extra=(memberNames||[]).filter(Boolean).map(function(nm){ return {group_id:gid, name:nm, role:'editor', claim_token:randToken()}; });
     return extra.length ? SB.from('members').insert(extra) : {error:null};
   }).then(function(r){ if(r && r.error) throw r.error; return loadGroups(); })
-    .then(function(){ done&&done(gid); }).catch(sbFail);
+    .then(function(){ done&&done(gid); })
+    .catch(function(e){ sbFail(e); done&&done(null); });
 }
 function addMemberTo(g, name, done){
   if(!cloudOn()){ alert("Bulut aloqasi yo'q — internetni tekshiring."); return; }
   SB.from('members').insert({group_id:g.id, name:name, role:'editor', claim_token:randToken()}).select().single()
     .then(function(r){ if(r.error) throw r.error; var mid=r.data.id; return loadGroups().then(function(){ done&&done(mid); }); })
-    .catch(sbFail);
+    .catch(function(e){ sbFail(e); done&&done(null); });
 }
 function updateMember(g, memberId, patch, done){
   SB.from('members').update(patch).eq('id',memberId).then(function(r){
@@ -727,7 +728,8 @@ function saveExpenseTo(g, existing, data, done){
   if(!canEdit(g)){ alert('Sizda tahrirlash huquqi yo‘q — guruh egasidan so‘rang.'); return; }
   var row=entryToRow(g, data);
   var q = existing ? SB.from('entries').update(row).eq('id', existing.id) : SB.from('entries').insert(row);
-  q.then(function(r){ if(r.error) throw r.error; return loadGroups(); }).then(function(){ done&&done(); }).catch(sbFail);
+  q.then(function(r){ if(r.error) throw r.error; return loadGroups(); }).then(function(){ done&&done(); })
+   .catch(function(e){ sbFail(e); done&&done(); });
 }
 function deleteExpenseFrom(g, id){
   SB.from('entries').delete().eq('id',id).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
@@ -736,7 +738,8 @@ function saveSettlementTo(g, existing, s, done){
   if(!canEdit(g)){ alert('Sizda tahrirlash huquqi yo‘q.'); return; }
   var row={group_id:g.id, from_member:s.from, to_member:s.to, amount:s.amount, occurred_on:s.date};
   var q = existing ? SB.from('settlements').update(row).eq('id', existing.id) : SB.from('settlements').insert(row);
-  q.then(function(r){ if(r.error) throw r.error; return loadGroups(); }).then(function(){ done&&done(); }).catch(sbFail);
+  q.then(function(r){ if(r.error) throw r.error; return loadGroups(); }).then(function(){ done&&done(); })
+   .catch(function(e){ sbFail(e); done&&done(); });
 }
 function deleteSettlementFrom(g, id){
   SB.from('settlements').delete().eq('id',id).then(function(r){ if(r.error) return sbFail(r.error); loadGroups(); });
@@ -1405,7 +1408,7 @@ function openGroupModal(){
       var name=f.name.value.trim(); if(!name) return;
       var names=f.mem.value.split(',').map(function(s){return s.trim();}).filter(Boolean);
       f.querySelector('button[type=submit]').textContent='Yaratilmoqda…';
-      createGroupCloud(name, names, function(gid){ if(gid) go('group',{id:gid,tab:'balances'}); });
+      createGroupCloud(name, names, function(gid){ closeModal(); if(gid) go('group',{id:gid,tab:'balances'}); });
     }
   });
 }
